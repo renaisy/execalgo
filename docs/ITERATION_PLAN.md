@@ -22,6 +22,7 @@
 | v2.0 | LGBM 方向模型 | alpha 感知执行+真实信号 | ~2 天 | v1.5 | 已完成（信号弱瓶颈） |
 | v2.1 | 求解器鲁棒性 | Armijo+底部保障修复 | ~0.5 天 | v2.0 | 已完成（死区解锁） |
 | v2.2 | 整改修复 | 求解器病理链+数据前视+LGBM特征 | ~1 天 | v2.1 | 已完成 |
+| v2.3 | 收尾冲刺 | P0 形状崩溃+夜盘键+位移测试 | ~0.5 天 | v2.2 | 已完成 |
 
 ## 全程回归门槛（每轮迭代必须保持）
 
@@ -268,3 +269,26 @@ clock-aligned 从 session start，alpha 前视修复（fast 窗口右端从 t �
 ### P1 清理
 run_v13 测试 IC 不覆盖训练 IC、planner_state 重复字段删除、algorithms.py 无用 import、
 pyproject 版本 2.2.0 + lightgbm 依赖、smoke_alignment.py 删除。
+
+
+## v2.3 收尾冲刺（已完成）
+
+三个 P0 修复 + P1 清理 + git 初始化，测试 100→**101 项全绿**：
+
+### P0 修复
+1. `lgbm_alpha.py:220` — `alpha[warm:]` → `alpha[warm+1:]`（164 行预测匹配 164 槽位）
+2. `realdata.py:250` — `night_last_price.get(prior[-1])` → `.get(day)`（session 键直接查）
+3. `branch.py:255` — 位移测试改为 `‖rate − rate_old‖`（clip+重分配后的实际位移）
+
+### P1 清理
+- `planner_state.py` 重复字段声明块清除
+- `lgbm_alpha.py` 死代码删除（`pd_skew`/`_rsi` 含旧版错误 RSI）
+- 质量门测试加强：`assert rate.max() < 3× base_max` 替代 `try/except pass`
+- 新增 `test_alpha_solver_converges_and_no_degenerate_spikes`
+- git 仓库初始化 + `.gitignore` + 首次提交
+
+### 修复后 run_v20 重跑（CU 30 天）
+- **run_v20 现在可以运行**（此前形状崩溃）
+- LGBM IC: +0.018（正向，v2.2 因子修正后量级更小更诚实）
+- 29/30 天质量门正确拒绝极端 alpha（替代 v2.1 的退化尖峰调度）
+- 唯一成功日：aware +0.022bp（t=1.0 边际），方向正确
