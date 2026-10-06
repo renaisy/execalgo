@@ -20,7 +20,7 @@ DT = 1.0 / 120.0  # 0.5 s in minutes
 
 def make_ticks(specs, slot=0):
     """specs: list of dicts with optional keys
-    last, bid, ask, bvol, avol, vol, sign, ask_px (5,), ask_vol (5,).
+    last, bid, ask, bvol, avol, vol, sign, slot, ask_px (5,), ask_vol (5,).
     Defaults give an empty book step of one snapshot."""
     n = len(specs)
     arr = lambda key, default: np.array(
@@ -29,11 +29,13 @@ def make_ticks(specs, slot=0):
         [s.get(key, [default] * 5) for s in specs], dtype=float)
     t = np.arange(n) * DT
     return BookTicks(
-        date=date(2025, 3, 10), t=t, slot=np.full(n, slot, dtype=int),
+        date=date(2025, 3, 10), t=t,
+        slot=np.array([s.get("slot", slot) for s in specs], dtype=int),
         last=arr("last", 100.0), bid1=arr("bid", 100.0), ask1=arr("ask", 110.0),
         bid_vol1=arr("bvol", 10.0), ask_vol1=arr("avol", 10.0),
         bid_vols=five("bid_vol", 10.0), ask_vols=five("ask_vol", 10.0),
-        bid_pxs=five("bid_px", 100.0),
+        bid_pxs=np.array([s.get("bid_px", [100.0, 99.0, 98.0, 97.0, 96.0])
+                          for s in specs], dtype=float),
         ask_pxs=np.array([s.get("ask_px", [110.0, 111.0, 112.0, 113.0, 114.0])
                           for s in specs], dtype=float),
         vol_inc=arr("vol", 0.0), sign=arr("sign", 0.0),
@@ -183,3 +185,74 @@ def test_day_totals_are_consistent():
                        LadderPolicy(mode="passive_fallback"))
     assert res.passive_qty + res.taker_qty == pytest.approx(res.want_total)
     assert res.shortfall == pytest.approx(0.0)
+
+
+# ---- sell-side mirrors (v2.5) ----
+
+
+def test_sell_queue_depletion_at_the_ask():
+    """A resting SELL at the ask is consumed by BUY-signed prints; the queue
+    of 10 ahead exhausts on 4+4+2 and the overshoot of the next print fills
+    our 6 lots."""
+    specs = [{}]
+    specs += [{"last": 110.0, "vol": 4.0, "sign": +1.0},
+              {"last": 110.0, "vol": 4.0, "sign": +1.0},
+              {"last": 110.0, "vol": 2.0, "sign": +1.0},
+              {"last": 110.0, "vol": 5.0, "sign": +1.0},
+              {"last": 110.0, "vol": 3.0, "sign": +1.0}]
+    ticks = make_ticks(specs)
+    res = simulate_day(ticks, sched({0: 6.0}),
+                       LadderPolicy(mode="passive_fallback", side=-1))
+    assert res.passive_fraction == pytest.approx(1.0)
+    assert res.avg_price == pytest.approx(110.0)  # our limit, not the bid
+    assert [f.qty for f in res.fills] == pytest.approx([5.0, 1.0])
+    assert all(f.reason == "queue" for f in res.fills)
+
+
+def test_sell_trade_through_and_book_walk():
+    """A print ABOVE our ask limit fills the resting sell immediately at
+    our price; a separate idle minute escalates and hits the BID side
+    level by level."""
+    specs = [{}]
+    specs += [{"last": 115.0, "vol": 2.0, "sign": +1.0}]  # through our 110
+    specs += [{"slot": 1} for _ in range(20)]             # idle minute 1
+    ticks = make_ticks(specs)
+    pol = LadderPolicy(mode="ladder", side=-1, passive_timeout=5.0)
+    res = simulate_day(ticks, sched({0: 2.0, 1: 16.0}), pol)
+    passive = [f for f in res.fills if f.venue == "passive"]
+    taker = [f for f in res.fills if f.venue == "taker"]
+    assert len(passive) == 1 and passive[0].price == pytest.approx(110.0)
+    # the 16-lot escalation walked down the bids: 10 @ 100 then 6 @ 99
+    assert sum(f.qty for f in taker) == pytest.approx(16.0)
+    assert taker[0].price == pytest.approx(100.0)
+    assert taker[1].price == pytest.approx(99.0)
+
+
+def test_sell_gate_requires_mirror_microprice():
+    """Bid-heavy book (micro above mid) all minute: the SELL gate never opens;
+    the slice completes as taker at the minute end."""
+    specs = [{"bvol": 20.0, "avol": 5.0} for _ in range(120)]  # frac ~ +0.6
+    ticks = make_ticks(specs)
+    pol = LadderPolicy(mode="ladder", side=-1, passive_timeout=30.0,
+                       gate="microprice")
+    res = simulate_day(ticks, sched({0: 10.0}), pol)
+    assert res.passive_fraction == pytest.approx(0.0)
+    assert res.fills[0].t == pytest.approx(ticks.t[-1])
+    assert res.fills[0].price == pytest.approx(100.0)  # hit the bid
+
+
+def test_sell_adverse_drift_sign_normalized():
+    """For sells, a rising mid after the fill is adverse: drift_bps is
+    negative under the side-normalized convention."""
+    specs = [{}]
+    specs += [{"last": 110.0, "vol": 4.0, "sign": +1.0}]  # fills 4 lots... queue 10
+    specs += [{"last": 110.0, "vol": 8.0, "sign": +1.0}]  # exhausts, fills 2
+    specs += [{} for _ in range(5)]
+    specs += [{"bid": 101.0, "ask": 111.0, "last": 110.0}]  # mid drifts up
+    ticks = make_ticks(specs)
+    res = simulate_day(ticks, sched({0: 2.0}),
+                       LadderPolicy(mode="passive_fallback", side=-1))
+    assert res.passive_fraction == pytest.approx(1.0)
+    drift = res.adverse_drift_bps(ticks, "passive", side=-1)
+    # we sold at 110, the mid then sat at 106: sold high = favorable = positive
+    assert drift == pytest.approx((110.0 - 106.0) / 110.0 * 1e4)
