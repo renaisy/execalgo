@@ -17,6 +17,7 @@ import json
 import pathlib
 import sys
 import time
+from dataclasses import replace
 from datetime import date
 
 import numpy as np
@@ -101,9 +102,10 @@ def stage1_minute(symbol, train, test, calib, kernel):
     return rows
 
 
-def stage2_tick(symbol, test, calib, max_days):
+def stage2_tick(symbol, test, calib, max_days, side=+1):
     days = test if max_days is None else test[:max_days]
-    print(f"\n----- Stage 2: tick 级（{len(days)} 天, 同一 TWAP 日程） -----")
+    direction = "买入" if side > 0 else "卖出"
+    print(f"\n----- Stage 2: tick 级（{len(days)} 天, {direction}, 同一 TWAP 日程） -----")
     path = DATA_DIR / f"{symbol}_Comdty" / f"{symbol}_Comdty_2025.feather"
     twap = np.full(N_SESSION_MINUTES, calib["share"] / N_SESSION_MINUTES)
 
@@ -121,13 +123,16 @@ def stage2_tick(symbol, test, calib, max_days):
             continue
         tape_vwap = float((ticks.last * ticks.vol_inc).sum() / ticks.vol_inc.sum())
         for name, pol in TICK_POLICIES.items():
+            pol = replace(pol, side=side)
             r = simulate_day(ticks, twap, pol)
+            # direction-normalized cost: positive = paid above arrival for
+            # buys / sold below arrival for sells; save = taker minus policy
             per_policy[name].append({
                 "passive_fraction": r.passive_fraction,
-                "is_bps": (r.avg_price - arrival) / arrival * 1e4,
-                "vwap_bps": (r.avg_price - tape_vwap) / tape_vwap * 1e4,
-                "drift_passive_bps": r.adverse_drift_bps(ticks, "passive"),
-                "drift_taker_bps": r.adverse_drift_bps(ticks, "taker"),
+                "is_bps": side * (r.avg_price - arrival) / arrival * 1e4,
+                "vwap_bps": side * (r.avg_price - tape_vwap) / tape_vwap * 1e4,
+                "drift_passive_bps": r.adverse_drift_bps(ticks, "passive", side),
+                "drift_taker_bps": r.adverse_drift_bps(ticks, "taker", side),
                 "shortfall": r.shortfall,
                 "escalations": r.escalations,
             })
@@ -192,7 +197,7 @@ def make_figure(symbol, minute_rows, tick_rows):
     print(f"图: {out}")
 
 
-def run(symbol, max_days):
+def run(symbol, max_days, side=+1):
     print(f"===== {symbol}: v2.4 盘口优化验证 =====")
     train = list(iter_day_sessions(
         DATA_DIR / f"{symbol}_Comdty" / f"{symbol}_Comdty_2024.feather", *TRAIN_RANGE))
@@ -208,7 +213,7 @@ def run(symbol, max_days):
           f"总成本目标 {calib['total_bps']:.1f}bp")
 
     minute_rows = stage1_minute(symbol, train, test, calib, kernel)
-    tick_rows = stage2_tick(symbol, test, calib, max_days)
+    tick_rows = stage2_tick(symbol, test, calib, max_days, side=side)
 
     best = max(tick_rows, key=lambda r: r["save_vs_taker_bps"])
     acceptance = {
@@ -231,7 +236,7 @@ def run(symbol, max_days):
         "tick_stage": tick_rows,
         "acceptance": acceptance,
     }
-    out = OUT / "book_opt_v24.json"
+    out = OUT / f"book_opt_v24_{symbol}.json"
     out.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
     print(f"结果: {out}")
 
@@ -244,6 +249,7 @@ def run(symbol, max_days):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default="CU")
+    parser.add_argument("--side", choices=["buy", "sell"], default="buy")
     parser.add_argument("--max-days", type=int, default=None)
     args = parser.parse_args()
-    run(args.symbol, args.max_days)
+    run(args.symbol, args.max_days, side=1 if args.side == "buy" else -1)
