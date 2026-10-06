@@ -28,10 +28,14 @@ from .realdata import N_SESSION_MINUTES, TradingDay
 
 @dataclass(frozen=True)
 class MakerPolicy:
-    passive_fraction: float = 0.5    # pi: share of each slice posted passively
+    passive_fraction: object = 0.5  # pi: share posted passively; "auto" = no
+                                    # policy cap, the calibrated fill curve is
+                                    # the only limit (v2.4)
     queue_capture: float = 0.7       # beta: fallback constant (no fill_curve)
     auction_taker_only: bool = True  # T20: no passive in the opening minute
     fill_curve: object = None        # v1.2: calibrated FillCurve overrides beta
+    spread_mode: str = "day"         # "day" | "minute": per-minute median
+                                     # half spread instead of one daily number
 
 
 def replay_day_book(
@@ -66,12 +70,23 @@ def replay_day_book(
                  else np.zeros(n))
     bid_depth = day.minute_bid_depth  # None for synthetic days without depth
     half_spread = float(day.half_spread)
+    # v2.4: per-minute spread when the day carries it (falls back to the
+    # session constant on synthetic / legacy days)
+    if policy.spread_mode == "minute" and day.minute_half_spread is not None:
+        hs = np.asarray(day.minute_half_spread, dtype=float)
+        minute_half_spread = np.where(hs > 0, hs, half_spread)
+    else:
+        minute_half_spread = np.full(n, half_spread)
+
+    pi_cap = None if policy.passive_fraction == "auto" \
+        else float(policy.passive_fraction)
 
     pending = 0.0                     # rolled-forward quantity (T20)
     passive_filled_total = 0.0
     taker_total = 0.0
     cost_notional = 0.0
     executed = 0.0
+    spread_notional = 0.0
     last_tradable = -1
     for k in range(n):
         want = quantities[k] + pending
@@ -86,21 +101,22 @@ def replay_day_book(
             if policy.fill_curve is not None and bid_depth is not None:
                 # v1.2: calibrated curve — fill depends on flow AND depth
                 from .fill_calibration import fill_at
-                passive_cap = min(policy.passive_fraction * want,
-                                  fill_at(policy.fill_curve,
-                                          sell_flow[k], bid_depth[k]))
+                cap = fill_at(policy.fill_curve, sell_flow[k], bid_depth[k])
+                passive_cap = cap if pi_cap is None else min(pi_cap * want, cap)
             else:
                 # v1.0 fallback: constant queue capture ratio
-                passive_cap = min(policy.passive_fraction * want,
-                                  policy.queue_capture * sell_flow[k])
+                cap = policy.queue_capture * sell_flow[k]
+                passive_cap = cap if pi_cap is None else min(pi_cap * want, cap)
         passive = passive_cap
         taker = want - passive
         if taker < 0.0:               # flow alone over-filled the slice
             passive, taker = want, 0.0
         mid = day.minute_vwap[k] + residual[k]
+        hs_k = minute_half_spread[k]
         # deferred lots are priced at THIS minute's blended fill, where they
         # actually execute
-        cost_notional += (mid - half_spread) * passive + (mid + half_spread) * taker
+        cost_notional += (mid - hs_k) * passive + (mid + hs_k) * taker
+        spread_notional += (passive - taker) * hs_k
         passive_filled_total += passive
         taker_total += taker
         executed += want
@@ -109,7 +125,9 @@ def replay_day_book(
         # the day ends on untradable minutes: force the tail into the last
         # tradable minute as a taker burst (the realistic forced completion)
         mid = day.minute_vwap[last_tradable] + residual[last_tradable]
-        cost_notional += (mid + half_spread) * pending
+        hs_k = minute_half_spread[last_tradable]
+        cost_notional += (mid + hs_k) * pending
+        spread_notional -= hs_k * pending
         taker_total += pending
         executed += pending
         pending = 0.0
@@ -128,9 +146,9 @@ def replay_day_book(
         "is_bps": (cost - arrival) / arrival * 1e4,
         "vwap_bps": (cost - vwap) / vwap * 1e4,
         "passive_fraction": float(passive_filled_total / executed),
-        "spread_capture_bps": float(
-            (passive_filled_total - taker_total) * half_spread / (executed * vwap) * 1e4
-        ),
+        # spread captured net of spread paid, at the minute spreads actually
+        # faced (v2.4: was (passive - taker) * daily half_spread)
+        "spread_capture_bps": float(spread_notional / (executed * vwap) * 1e4),
         "executed_fraction": float(executed / share),
         "arrival": arrival,
         "vwap": vwap,
