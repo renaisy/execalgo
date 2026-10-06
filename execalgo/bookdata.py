@@ -128,13 +128,16 @@ def load_day_ticks(path, day, min_snapshots: int = 5000) -> BookTicks:
         )
 
     # degenerate books (locked/one-sided quotes) poison prices and queues:
-    # forward-fill the last sane book over them rather than dropping trades
+    # forward-fill the last sane book over them rather than dropping trades;
+    # leading degenerate rows (locked open) take the FIRST sane book
     bid1 = sub["bidPrice1"].astype(float)
     ask1 = sub["askPrice1"].astype(float)
     valid = (bid1 > 0.0) & (ask1 > bid1)
+    if not valid.any():
+        raise ValueError(f"{day_str}: no two-sided quote in the whole session")
     for col in px_cols + vol_cols:
         sub.loc[~valid, col] = np.nan
-        sub[col] = sub[col].ffill()
+        sub[col] = sub[col].ffill().bfill()
 
     # tick rule on consecutive print prices; carry the sign through flat
     # prints and zero out non-trade snapshots

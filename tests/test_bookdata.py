@@ -39,6 +39,10 @@ def _write_synthetic_ticks(path):
         frame[f"askVolume{lvl}"] = 30 + lvl
     # one limit-locked degenerate row in the middle of the day session
     frame.loc[frame["time"].str.startswith("2025-06-04 04:02:00"), "bidPrice1"] = 0.0
+    # AND a degenerate opening stretch (locked open): leading rows have no
+    # earlier sane book to forward-fill from (v2.4: the 2025-04-07 case)
+    lead = frame["time"].str.startswith("2025-06-04 04:00")
+    frame.loc[lead, "bidPrice1"] = 0.0
     pyarrow_feather.write_feather(frame, path)
     return frame
 
@@ -91,11 +95,17 @@ def test_book_invariants_microprice_and_l1(tmp_path):
 
 
 def test_degenerate_book_forward_filled(tmp_path):
-    """The bid=0 row must not poison prices: the previous sane book fills in."""
+    """The bid=0 rows must not poison prices: mid-row gaps forward-fill from
+    the previous sane book, the locked opening backfills from the first sane
+    quote, and the opening mid is finite."""
     ticks = _load(tmp_path)
     assert (ticks.bid1 > 0).all()
+    assert np.isfinite(ticks.mid).all()
+    assert np.isfinite(ticks.mid[0])
     lock_idx = np.flatnonzero(ticks.t >= 2.0)[0]  # snapshot at 04:02:00
     assert ticks.bid1[lock_idx] == pytest.approx(ticks.bid1[lock_idx - 1])
+    # the locked opening takes the first sane book (the 04:00:30 row)
+    assert ticks.bid1[0] == pytest.approx(ticks.bid1[2])
 
 
 def test_minute_bounds_and_stats(tmp_path):

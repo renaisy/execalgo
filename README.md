@@ -453,6 +453,52 @@ T29 独立 vs 顺序执行（CU+BC 80 天）：独立 12.86±26 bp < 顺序 15.1
 位移测试未按声明实现）。v2.3 修复后 run_v20 可正常运行：质量门正确拒绝
 极端 alpha（29/30 天），唯一成功日方向正确（+0.02bp t=1.0）。
 
+## 17.7 v2.4：盘口优化（tick 级队列物理）
+
+执行成本的真实杠杆排序是 ①执行方式（maker/taker 价差 ~1.9bp）>
+②冲击模型校准 > ③轨迹优化（vs TWAP 仅 0.7bp 不显著）。v2.4 聚焦 ①：
+把分钟柱的 maker/taker 分割替换为 ~0.5s 快照上的显式微观结构模型。
+
+**新增模块**：
+
+- [execalgo/bookdata.py](execalgo/bookdata.py) — 单日 tick 级 L5 加载器
+  （mid/microprice/逐档价量/tick-rule 符号量；开盘前锚点保住竞价量）
+- [execalgo/tick_sim.py](execalgo/tick_sim.py) — 队列物理模拟器：
+  L1 队尾入队（FIFO + 队首溢出部分成交 + 观测撤单钳制）、trade-through
+  即刻成交、taker 走 L1-L5 逐档吃单（真实走册成本）、ladder 超时升级、
+  半价差归一化的 microprice 门与撤单守卫
+- `fill_calibration.py` v2.4 — `queue_basis="l1"`（L1 队列才是排队前方，
+  L5 之和高估 ~8 倍）+ isotonic 单调平滑（消除 10 箱阶梯跳变）
+- `execution_model.py` v2.4 — `passive_fraction="auto"`（去掉 π=0.5 策略
+  硬顶，标定曲线是唯一限制）+ `spread_mode="minute"`（分钟级中位价差）
+
+**真实数据结果**（CU 2025H1 117 天，TWAP，5% 参与率，
+`python3 scripts/run_book_opt.py`）：
+
+| 层 | 策略 | 被动占比 | vs taker 节省 (bp) | t 统计量 |
+|---|---|---|---|---|
+| 分钟 | v1.2 基线（π=0.5, L5, 日价差） | 15.7% | — | — |
+| 分钟 | auto-π + L1 曲线 | 35.7% | +0.26 | — |
+| tick | passive_fallback（整分钟挂单） | **79.1%** | **+0.881** | **52.7** |
+| tick | ladder30（30s 超时升级） | 68.3% | +0.741 | 44.9 |
+| tick | ladder30+gate | 57.6% | +0.654 | 31.2 |
+| tick | ladder30+gate+guard | 46.7% | +0.508 | 26.5 |
+
+**核心发现**：
+
+1. 17.9% 被动占比的约束从来不是曲线偏差，而是 **π=0.5 策略上限与分钟柱
+   粒度**——tick 级整分钟挂单直接到 79.1%，vs taker 节省 0.88bp/日且
+   t=52.7（117 天配对）。
+2. 被动成交的 5 分钟平均 drift 为 **+0.27bp（轻度有利，无系统性逆向选择
+   惩罚）**；microprice 门与撤单守卫能改善 drift 的选择但被动占比损失大于
+   drift 收益——**无条件挂单 + 日终强制补全**是当前性价比最高的盘口策略。
+3. tick 级 +0.88bp ≈ 分钟级快赢（+0.26bp）的 3.4 倍，验证"粒度即价值"：
+   队列位置、trade-through、走册成本都只在 tick 层可见。
+
+**局限**（文档化假设）：模拟器不建模自身订单对盘口的反馈（5% 参与率下
+单分钟切片 ~16 手 < L1 均值 ~25 手）；冲击项仍由 replay_day 定价，tick
+层只度量微观执行。
+
 ## 17. 目录结构
 
 ```
@@ -472,13 +518,15 @@ execalgo/            算法包
   kernel_calibration.py v0.5 核校准（响应/去卷积/拟合/自举）
   sensitivity.py       v0.4 存活表聚合（survival_table/robust_verdict）
   constrained.py       v1.0 活跃集箱约束求解（线性精确 + 投影牛顿）
-  execution_model.py   v1.0 盘口 maker/taker 执行模型（v1.2 支持 fill_curve）
-  fill_calibration.py  v1.2 被动成交概率标定（FillCurve + calibrate + fill_at）
+  execution_model.py   v1.0 盘口 maker/taker 执行模型（v1.2 fill_curve / v2.4 auto-π+分钟价差）
+  fill_calibration.py  v1.2 被动成交概率标定（v2.4 L1 队列基线 + isotonic 平滑）
   signal.py            v1.3 动量信号 + IC 检验 + solver 单位缩放
   cross_impact.py      v1.4 跨品种冲击溢出估计（cross_response / spillover_ratio）
   planner_state.py     v1.5 快照/恢复（PlannerSnapshot + snapshot/restore）
   decision.py          v1.5 决策记录（ExecutionDecision + make_decision）
   lgbm_alpha.py        v2.0 LGBM 方向模型推理（25 因子×2 尺度→批量预测）
+  bookdata.py          v2.4 单日 tick 级 L5 快照加载（~0.5s 分辨率）
+  tick_sim.py          v2.4 tick 级队列物理模拟器（ladder/gate/guard 策略）
 scripts/             演示与验证脚本（输出图与 JSON 到 scripts/out/）
 tests/               pytest 套件（论文数值验收 + 回放不变量 + 加载器）
 reference/           论文官方数值补充（只读对照，勿改）

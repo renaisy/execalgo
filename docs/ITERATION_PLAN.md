@@ -292,3 +292,29 @@ pyproject 版本 2.2.0 + lightgbm 依赖、smoke_alignment.py 删除。
 - LGBM IC: +0.018（正向，v2.2 因子修正后量级更小更诚实）
 - 29/30 天质量门正确拒绝极端 alpha（替代 v2.1 的退化尖峰调度）
 - 唯一成功日：aware +0.022bp（t=1.0 边际），方向正确
+
+---
+
+## v2.4 盘口优化（tick 级队列物理）
+
+目标：把被动成交占比从 17.9% 提到 50%+，vs taker 净节省 ≥0.3bp。
+
+### 交付
+- bookdata.py：单日 ~0.5s L5 快照加载器（开盘前锚点保竞价量、退化盘口
+  前向填充、tick-rule 符号量）
+- tick_sim.py：队列物理模拟器（FIFO+队首溢出+撤单钳制、trade-through、
+  L1-L5 走册、ladder 超时升级、半价差归一 microprice 门/撤单守卫）
+- realdata.py：保留 minute_bid_l1/ask_l1/minute_half_spread（Arrow 求和
+  前留住 L1）
+- fill_calibration.py：queue_basis="l1" + isotonic（PAVA）单调平滑
+- execution_model.py：passive_fraction="auto" + spread_mode="minute"
+- run_book_opt.py：分钟级 Stage1 + tick 级 Stage2 双层验证
+
+### 验收（CU 2025H1 117 天，TWAP，5% 参与率）
+- ladder+gate 被动占比 ≥40% ✓（ladder30+gate+guard 46.7%；passive_fallback 79.1%）
+- 净节省 ≥0.3bp ✓（passive_fallback +0.881bp, t=52.7）
+- 101+21 项测试全绿（122 项）
+
+### 结论
+约束是策略上限与分钟粒度而非曲线偏差；无条件挂单+日终补全 >
+门控/守卫变体（门选出 drift 更好的成交但占比损失更大）。
