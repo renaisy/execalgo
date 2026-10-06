@@ -91,6 +91,9 @@ class TradingDay:
     minute_high: object = None       # (225,) max lastPrice of each minute
     minute_low: object = None        # (225,) min lastPrice of each minute
     minute_close: object = None      # (225,) last lastPrice of each minute
+    minute_bid_l1: object = None     # (225,) mean resting bid L1 queue, lots (v2.4)
+    minute_ask_l1: object = None     # (225,) mean resting ask L1 queue, lots (v2.4)
+    minute_half_spread: object = None  # (225,) per-minute median half spread (v2.4)
 
 
 def iter_day_sessions(
@@ -104,12 +107,16 @@ def iter_day_sessions(
     table = feather.read_table(path, columns=all_columns, memory_map=True)
 
     # sum the 10 depth columns into 2 (bid_depth / ask_depth) in Arrow before
-    # pandas — avoids materializing 10 int64 columns (~835 MB/year-file)
+    # pandas — avoids materializing 10 int64 columns (~835 MB/year-file) —
+    # but keep the L1 queues (v2.4): they are the queue a joining order
+    # actually sits behind, unlike the L1-L5 sum
     from functools import reduce
     bid_sum = reduce(pc.add, [table.column(f"bidVolume{i}") for i in range(1, 6)])
     ask_sum = reduce(pc.add, [table.column(f"askVolume{i}") for i in range(1, 6)])
     table = table.append_column("bid_depth", bid_sum)
     table = table.append_column("ask_depth", ask_sum)
+    table = table.append_column("bid_l1", table.column("bidVolume1"))
+    table = table.append_column("ask_l1", table.column("askVolume1"))
     table = table.drop_columns(depth_cols)
 
     time_col = table.column("time")
@@ -218,6 +225,8 @@ def iter_day_sessions(
             signed=("signed_volume", "sum"),
             buy=("buy_volume", "sum"), sell=("sell_volume", "sum"),
             bid_depth=("bid_depth", "mean"), ask_depth=("ask_depth", "mean"),
+            bid_l1=("bid_l1", "mean"), ask_l1=("ask_l1", "mean"),
+            half_spread_m=("half_spread", "median"),
             open_px=("lastPrice", "first"), high_px=("lastPrice", "max"),
             low_px=("lastPrice", "min"), close_px=("lastPrice", "last"),
         )
@@ -277,6 +286,9 @@ def iter_day_sessions(
             _ohlc_array(bars, "max", slots, series.to_numpy()),
             _ohlc_array(bars, "min", slots, series.to_numpy()),
             _ohlc_array(bars, "last", slots, series.to_numpy()),
+            _slots_array(bars["bid_l1"].to_numpy(), slots),
+            _slots_array(bars["ask_l1"].to_numpy(), slots),
+            _slots_array(np.nan_to_num(bars["half_spread_m"].to_numpy()), slots),
         )
 
 
