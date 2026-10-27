@@ -524,6 +524,33 @@ BU 上全天单边报价（跌停封死），被加载器的全天退化守卫�
 79.4% / 节省 7.47 CNY——经济镜像成立。`run_book_opt.py --side sell` 支
 持卖出侧全量回测（成本与 drift 指标按方向归一）。
 
+## 17.9 v2.6：生产路径端到端（planner + tick 执行）
+
+[execalgo/planner_book.py](execalgo/planner_book.py) 把 RollingPlanner 的
+重规划循环接到 tick 模拟器：`execute_with_book(planner, ticks, share,
+policy)` 逐重规划区间产出分钟数量并按真实盘口成交（空分钟顺延、日终强
+制补全、成交量只在通过后向 planner 揭示——与 `execute()` 的因果性一致）。
+[scripts/run_v26.py](scripts/run_v26.py) 在同一日程上分解两层的成本贡献
+（CU 20 日，X=3,589 手）：
+
+| 臂 | 被动占比 | is_bps |
+|---|---|---|
+| planner + taker | 0.0% | 0.41 |
+| planner + fallback | 76.2% | −0.56 |
+| **TWAP + fallback** | **75.2%** | **−0.82** |
+| TWAP + taker | 0.0% | 0.00 |
+
+| 配对差 | 节省 (bp) | t |
+|---|---|---|
+| 微观层（同轨迹 fallback vs taker） | **+0.972** | 19.5 |
+| 轨迹层（同微观 planner vs TWAP） | −0.259 | −0.3 |
+| 合计（TWAP fallback vs taker） | +0.825 | 21.8 |
+
+端到端数字独立复现了成本杠杆排序：**微观层贡献 +0.97bp（t=19.5）而轨迹
+层 −0.26bp（不显著且为负）**——在没有 alpha 信号时，重规划轨迹相对 TWAP
+没有优势，最优组合仍是 TWAP + passive_fallback。这为"使用建议"中的推荐
+配置提供了生产路径口径的直接证据。
+
 ## 17. 目录结构
 
 ```
@@ -551,7 +578,8 @@ execalgo/            算法包
   decision.py          v1.5 决策记录（ExecutionDecision + make_decision）
   lgbm_alpha.py        v2.0 LGBM 方向模型推理（25 因子×2 尺度→批量预测）
   bookdata.py          v2.4 单日 tick 级 L5 快照加载（~0.5s 分辨率）
-  tick_sim.py          v2.4 tick 级队列物理模拟器（ladder/gate/guard 策略）
+  tick_sim.py          v2.4 tick 级队列物理模拟器（v2.5 双向对称）
+  planner_book.py      v2.6 重规划轨迹 + tick 盘口执行（execute_with_book）
 scripts/             演示与验证脚本（输出图与 JSON 到 scripts/out/）
 tests/               pytest 套件（论文数值验收 + 回放不变量 + 加载器）
 reference/           论文官方数值补充（只读对照，勿改）
